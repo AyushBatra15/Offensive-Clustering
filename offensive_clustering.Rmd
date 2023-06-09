@@ -1,0 +1,961 @@
+---
+title: "Offense Clustering"
+author: "Ayush Batra"
+date: "2023-06-04"
+output: html_document
+---
+
+See the article I wrote here: https://bestballstats.com/2023/06/09/offensive-clustering-why-the-warriors-and-nuggets-are-unique/
+
+# Introduction
+
+In this project, I clustered NBA offenses based on stylistic traits like shot selection, how points were scored, pace, and passing. The goal was to see some different play styles in the NBA in the past few seasons and to explore how play styles have been changing recently. 
+
+First, we must load in the necessary packages:
+
+```{r load-packages}
+
+library(tidyverse)
+library(hoopR)
+library(dplyr)
+library(factoextra)
+library(corrplot)
+library(ggcorrplot)
+library(cowplot)
+library(ggimage)
+library(scales)
+
+# This is necessary for some of the functions to gather data using the hoopR package
+Sys.setenv("VROOM_CONNECTION_SIZE" = 2*131072)
+
+```
+
+# Load Offensive Stats
+
+## Standard Stats
+
+```{r standard}
+
+# The loop below gets standard box score stats for every team in every season from
+# 2016 to 2023. I have commented it out because it takes a long time (and sometimes
+# multiple tries) to run. Instead, I have loaded the data gathered from this loop
+# to github for quicker access. 
+
+standard <- read_csv(file = "https://raw.githubusercontent.com/AyushBatra15/Offensive-Clustering/main/data/standard.csv")
+
+# standard <- tibble()
+# for (y in c(YR_START : YR_END)) {
+#   y <- as.numeric(y)
+#   str_szn <- paste(y-1, str_sub(as.character(y), 3, 4), sep = "-")
+#   trad <- nba_leaguedashteamstats(season = str_szn, 
+#                                   season_type = "Regular Season",
+#                                   per_mode = "Totals",
+#                                   measure_type = "Base")
+#   trad <- trad[["LeagueDashTeamStats"]]
+#   
+#   adv <- nba_leaguedashteamstats(season = str_szn,
+#                                  season_type = "Regular Season",
+#                                  measure_type = "Advanced")
+#   adv <- adv[["LeagueDashTeamStats"]]
+#   
+#   trad <- trad %>%
+#     mutate(SEASON = y) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, GP, W, L, FGM, FGA, FG3M, FG3A, FTM, FTA, OREB,
+#            AST, TOV, PFD, PTS) %>%
+#     mutate(across(GP : PTS, as.numeric)) 
+#   
+#   adv <- adv %>%
+#     mutate(SEASON = y) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, OFF_RATING, PACE) %>%
+#     mutate(across(OFF_RATING : PACE, as.numeric))
+#   
+#   s <- trad %>%
+#     inner_join(adv, by = c("TEAM_ID", "TEAM_NAME", "SEASON"))
+#   
+#   standard <- rbind(standard, s)
+#   
+#   print(paste("Loaded Stats for",str_szn))
+# }
+
+```
+
+Noe that the standard stats have been loaded in, we can do some simple operations to get some more helpful stats. For example, some variables I wanted to look at included 3-point attempt rate (TPAr), turnover rate (TOV_RATE), foul drawn rate (FD_RATE), and assist rate (AST_RATE). After creating these variables, I used the `corrplot()` function to create a correlation matrix showing the correlation among these variables. 
+
+```{r standard-cleaning}
+
+standard <- standard %>%
+  mutate(TPAr = FG3A / FGA,
+         FG2P = (FGM - FG3M) / (FGA - FG3A),
+         FG3P = FG3M / FG3A,
+         FTP = FTM / FTA,
+         FTR = FTA / FGA,
+         OREB_RATE = OREB / (FGA - FGM),
+         TOV_RATE = TOV / (FGA + TOV + 0.4 * FTA),
+         TSP = PTS / (2 * (FGA + 0.4 * FTA)),
+         FD_RATE = PFD / (FGA + 0.4 * FTA + TOV),
+         AST_RATE = AST / FGM,
+         WP = W / GP)
+
+st <- standard %>%
+  select(TEAM_ID, TEAM_NAME, SEASON, WP, OFF_RATING, PACE, FG2P, FG3P, FTP, TSP, 
+         TPAr, FTR, TOV_RATE, OREB_RATE, AST_RATE, FD_RATE)
+
+st %>%
+  select(WP : FD_RATE) %>%
+  cor() %>%
+  corrplot()
+
+```
+
+From the correlation matrix, we can see some of the relationships in the data. For example, win percentage and offensive rating are heavily correlated, as one would expect. In addition, offensive rating is correlated with other efficiency metrics like true shooting, 2-point field goal percentage, and 3-point field goal percentage. In contrast, stylistic stats like assist rate and foul drawn rate have a weaker relationship with other variables, perhaps indicating that they are capturing something more unique. 
+
+## Shot Selection Stats
+
+Next, we can load in some shot selection stats to get a better idea of where teams are taking their shots from. Again, I have commented out the loop that I used to actually gather this data because it may take a few tries to run. Loading the data from my github page will be much faster. 
+
+```{r shot-selection-data}
+
+shotloc <- read_csv(file = "https://raw.githubusercontent.com/AyushBatra15/Offensive-Clustering/main/data/shotloc.csv")
+
+# shotloc <- tibble()
+# for (y in c(YR_START : YR_END)) {
+#   str_szn <- paste(y-1, str_sub(as.character(y), 3, 4), sep = "-")
+#   
+#   sl <- nba_leaguedashteamshotlocations(season = str_szn,
+#                                         season_type = "Regular Season",
+#                                         per_mode = "Totals")
+#   sl <- sl[["ShotLocations"]]
+#   
+#   sl <- sl %>%
+#     mutate(SEASON = y) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, RA_FGM = Restricted_Area_FGM, RA_FGA = Restricted_Area_FGA,
+#            PT_FGM = In_The_Paint_Non_RA_FGM, PT_FGA = In_The_Paint_Non_RA_FGA,
+#            MR_FGM = Mid_Range_FGM, MR_FGA = Mid_Range_FGA, AB_FGM = Above_the_Break_3_FGM,
+#            AB_FGA = Above_the_Break_3_FGA, CN_FGM = Corner_3_FGM, CN_FGA = Corner_3_FGA) %>%
+#     mutate(across(RA_FGM : CN_FGA, as.numeric))
+#   
+#   shotloc <- rbind(shotloc, sl)
+#   
+#   print(paste("Loaded Stats for",str_szn))
+# }
+
+```
+
+To investigate shot selection, I thought the clearest way to look at the data would be to represent each area as a share of shot attempts. For example, if a team has 20 shots from the restricted area and 60 shots from other zones, I will represent the amount of shots in the restricted area as 25% of total shots instead of 20 shots. This way, we can ignore elements that may affect the total number of shots (like turnovers or offensive rebounds) and instead focus only on the share of shots in each zone. 
+
+```{r shot-selection-cleaning}
+
+shot_locs <- shotloc %>%
+  mutate(Total_FGA = RA_FGA + PT_FGA + MR_FGA + AB_FGA + CN_FGA,
+         PCT_RA = RA_FGA / Total_FGA,
+         PCT_PT = PT_FGA / Total_FGA,
+         PCT_MR = MR_FGA / Total_FGA,
+         PCT_AB = AB_FGA / Total_FGA,
+         PCT_CN = CN_FGA / Total_FGA,
+         RA_FGP = RA_FGM / RA_FGA,
+         PT_FGP = PT_FGM / PT_FGA,
+         MR_FGP = MR_FGM / MR_FGA,
+         AB_FGP = AB_FGM / AB_FGA,
+         CN_FGP = CN_FGM / CN_FGA) %>%
+  select(TEAM_ID, TEAM_NAME, SEASON, PCT_RA : CN_FGP)
+
+all <- st %>%
+  inner_join(shot_locs, by = c("TEAM_ID", "TEAM_NAME", "SEASON"))
+
+all %>%
+  select(WP, OFF_RATING, PACE, PCT_RA : CN_FGP) %>%
+  cor() %>%
+  corrplot()
+
+
+```
+
+Again, the correlation matrix can show some relationships within the data. For example, the share of shots from midrange (PCT_MR) is negatively correlated with the share of shots from above break 3's (PCT_AB) and the share of shots from corner 3's (PCT_CN). This means that teams with a higher share of midrange shots will tend to have lower shares of above break 3's and corner 3's. 
+
+## Miscellaneous Stats
+
+I took the same process as above with miscellaneous stats. On NBA.com, these stats include 2nd chance points, fastbreak points, points off turnovers, and points in the paint. I thought these would be good to include because they can tell about pace and style of offensive play. 
+
+```{r misc}
+
+misc <- read_csv(file = "https://raw.githubusercontent.com/AyushBatra15/Offensive-Clustering/main/data/misc.csv")
+
+all <- inner_join(all, misc, by = c("TEAM_ID", "TEAM_NAME", "SEASON"))
+
+# misc <- tibble()
+# for (y in c(YR_START : YR_END)) {
+#   str_szn <- paste(y-1, str_sub(as.character(y), 3, 4), sep = "-")
+#   
+#   totals <- nba_leaguedashteamstats(season = str_szn,
+#                                     season_type = "Regular Season",
+#                                     per_mode = "Totals",
+#                                     measure_type = "Base")
+#   totals <- totals[["LeagueDashTeamStats"]]
+#   
+#   m <- nba_leaguedashteamstats(season = str_szn,
+#                                season_type = "Regular Season",
+#                                per_mode = "Totals",
+#                                measure_type = "Misc")
+#   m <- m[["LeagueDashTeamStats"]]
+#   
+#   totals <- totals %>%
+#     mutate(SEASON = y,
+#            PTS = as.numeric(PTS)) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, PTS)
+#   
+#   m <- m %>%
+#     select(TEAM_ID, PTS_2ND_CHANCE, PTS_FB, PTS_PAINT) %>%
+#     mutate(across(2:4, as.numeric))
+#   
+#   totals <- totals %>%
+#     inner_join(m, by = "TEAM_ID") %>%
+#     mutate(pct_2ND_CHANCE = PTS_2ND_CHANCE / PTS,
+#            pct_FB = PTS_FB / PTS,
+#            pct_PAINT = PTS_PAINT / PTS) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, pct_2ND_CHANCE : pct_PAINT)
+#   
+#   misc <- rbind(misc, totals)
+#   
+#   print(paste("Loaded Stats for",str_szn))
+# }
+
+```
+
+## Tracking Stats
+
+Lastly, I included some tracking stats in the analysis. With tracking data, it is possible to analyze driving, passing, ball movement, and shot types more in-depth. 
+
+```{r tracking}
+
+tracking <- read_csv(file = 'https://raw.githubusercontent.com/AyushBatra15/Offensive-Clustering/main/data/tracking.csv')
+
+# for (y in c(YR_START : YR_END)) {
+#   str_szn <- paste(y-1, str_sub(as.character(y), 3, 4), sep = "-")
+#   
+#   adv <- nba_leaguedashteamstats(season = str_szn,
+#                                  season_type = "Regular Season",
+#                                  measure_type = "Advanced")
+#   adv <- adv[["LeagueDashTeamStats"]]
+#   
+#   adv <- adv %>%
+#     mutate(SEASON = y,
+#            POSS = as.numeric(POSS)) %>%
+#     select(TEAM_ID, TEAM_NAME, SEASON, POSS)
+#   
+#   passing <- nba_leaguedashptstats(player_or_team = "Team",
+#                                    pt_measure_type = "Passing",
+#                                    season = str_szn,
+#                                    season_type = "Regular Season")
+#   passing <- passing[["LeagueDashPtStats"]]
+#   
+#   passing <- passing %>%
+#     select(TEAM_ID, PASSES_MADE, POTENTIAL_AST) %>%
+#     mutate(across(c(PASSES_MADE : POTENTIAL_AST), as.numeric))
+#   
+#   touches <- nba_leaguedashptstats(player_or_team = "Team",
+#                                    pt_measure_type = "Possessions",
+#                                    season = str_szn,
+#                                    season_type = "Regular Season")
+#   touches <- touches[["LeagueDashPtStats"]]
+#   
+#   touches <- touches %>%
+#     select(TEAM_ID, AVG_SEC_PER_TOUCH, AVG_DRIB_PER_TOUCH) %>%
+#     mutate(across(c(AVG_SEC_PER_TOUCH : AVG_DRIB_PER_TOUCH), as.numeric))
+#   
+#   pts_splits <- nba_leaguedashptstats(player_or_team = "Team",
+#                                       pt_measure_type = "ShootingEfficiency",
+#                                       season = str_szn,
+#                                       season_type = "Regular Season")
+#   pts_splits <- pts_splits[["LeagueDashPtStats"]]
+#   
+#   pts_splits <- pts_splits %>%
+#     select(TEAM_ID, POINTS, DRIVE_PTS, CATCH_SHOOT_PTS, PULL_UP_PTS, POST_TOUCH_PTS) %>%
+#     mutate(across(c(POINTS : POST_TOUCH_PTS), as.numeric)) 
+#   
+#   pts_splits <- pts_splits %>%
+#     mutate(pct_PTS_DRIVE = DRIVE_PTS / POINTS,
+#            pct_PTS_CS = CATCH_SHOOT_PTS / POINTS,
+#            pct_PTS_PU = PULL_UP_PTS / POINTS,
+#            pct_PTS_POST = POST_TOUCH_PTS / POINTS) %>%
+#     select(TEAM_ID, pct_PTS_DRIVE : pct_PTS_POST)
+#   
+#   t <- adv %>%
+#     inner_join(passing, by = "TEAM_ID") %>%
+#     inner_join(touches, by = "TEAM_ID") %>%
+#     inner_join(pts_splits, by = "TEAM_ID")
+#   
+#   tracking <- rbind(tracking, t)
+#   
+#   print(paste("Loaded Stats for",str_szn))
+#     
+# }
+
+```
+
+With tracking data, it is possible to look at variables like passes per possession (PASS PER POSS), dribbles per touch (AVG_DRIB_PER_TOUCH), and the share of points from drives, pull-ups, catch & shoots, and post ups. All of these qualities will help to paint a more detailed picture of how each offense is scoring their points. 
+
+```{r tracking-vars}
+
+tr <- tracking %>%
+  mutate(PASS_PER_POSS = PASSES_MADE / POSS,
+         PA_100 = POTENTIAL_AST / POSS * 100,
+         PASS_PER_PA = PASSES_MADE / POTENTIAL_AST) %>%
+  select(TEAM_ID, TEAM_NAME, SEASON, PASS_PER_POSS : PASS_PER_PA, 
+         AVG_SEC_PER_TOUCH : pct_PTS_POST)
+
+all <- all %>%
+  inner_join(tr, by = c("TEAM_ID", "TEAM_NAME", "SEASON"))
+
+all %>%
+  select(WP, OFF_RATING, pct_2ND_CHANCE : pct_PTS_POST) %>%
+  cor() %>%
+  corrplot()
+
+```
+
+
+# Variable Selection
+
+Now that all possible variables have been loaded in, it is time to choose which variables will actually be used in the clustering analysis. 
+
+To begin this process, I created a correlation matrix of all the possible variables. Next, I found the root mean squared correlation of each variable to all others. This value summarizes how independent one variable is from all other variables. Note that the calculation squares the correlation, ensuring that the direction of the relationship (positive or negative) doesn't matter while the magnitude does. The results can be seen in the `order` tibble. Variables with a high root mean squared correlation included true shooting % (`TSP`) and offensive rating (`OFF_RATING`). This means that these two variables were heavily correlated with many other variables. Meanwhile, foul drawn rate (`FD_RATE`) and the share of points from fastbreak (`pct_FB`) had mostly low correlations to other variables, meaning they capture elements that are not really captured by other variables. 
+
+Since the idea is to have each variable give more and more information, it is better to include variables with a lower root mean squared correlation. 
+
+```{r}
+cors <- all %>%
+  select(-TEAM_ID, -TEAM_NAME, -SEASON) %>%
+  cor()
+
+related <- (cors * cors) %>%
+  colMeans() %>%
+  sqrt() %>%
+  sort()
+
+order <- tibble(
+  stat = names(related),
+  rmsc = related
+)
+
+order
+```
+
+My goal for this project was to cluster NBA offenses solely on stylistic traits. Therefore, I did not want to include any efficiency statistics, which could include different shooting metrics (true shooting, 2P%, 3P%, etc) and offensive rating. One exception to this rule is that I kept turnover rate, since I think it captures an element of passing riskiness and ball security that outweights the fact it is an efficiency metric. In addition, I eliminated some redundant variables. For example, I kept the share of points from 2nd chances and left out offensive rebounding rate since they measure a very similar quality. Additionally, I kept foul drawn rate and left out free throw rate because they basically measure the same thing. Overall, I kept pace, turnover rate, assist rate, foul drawn rate, passes/possession, dribbles/touch, shot selection stats (PCT_RA, PCT_PT, etc), and scoring type stats (pct_PTS_DRIVE, pct_PTS_POST, etc).  
+
+Although there are still some relationships among the chosen variables (for example, passes per possession is negatively associated with dribbles per touch), I feel that each of the variables capture something different. However, one could make a different choice of variables and it would be just as valid. 
+
+```{r}
+
+subset <- all %>%
+  select(TEAM_ID, TEAM_NAME, SEASON,
+         PACE, TOV_RATE, AST_RATE, FD_RATE,
+         PCT_RA : PCT_CN,
+         pct_2ND_CHANCE, pct_FB, PASS_PER_POSS, AVG_DRIB_PER_TOUCH, 
+         pct_PTS_DRIVE : pct_PTS_POST)
+
+var_names <- c("Pace", "TOV%", "AST%", "Foul Drawn %", "Passes / Possession",
+               "Dribbles / Touch", "%FGA Restricted Area","% FGA Paint", 
+               "% FGA Midrange", "% FGA Above Break 3", "% FGA Corner 3",
+               "% PTS 2nd Chance", "% PTS Fastbreak", "% PTS Drive", "% PTS Catch & Shoot", "% PTS Pull-Up",
+               "% PTS Post")
+
+cor_plot <- subset %>%
+  select(PACE : FD_RATE, PASS_PER_POSS, AVG_DRIB_PER_TOUCH,
+         PCT_RA : PCT_CN,
+         pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST) %>%
+  cor() %>%
+  ggcorrplot(method = "circle") +
+  scale_x_discrete(labels = var_names) +
+  scale_y_discrete(labels = var_names) +
+  labs(title = "Correlation Matrix of Clustering Variables",
+       caption = "Data from NBA.com | Graph by Ayush Batra") +
+  theme(axis.text.x = element_text(angle = 70))
+cor_plot
+
+```
+
+# Clustering
+
+## Variable Scaling
+
+To begin the clustering, I kept only seasons after 2018. Next, I scaled the variables by taking z-scores. However, there is a twist. For variables with the same denominator (like the shot selection variables), I standardized in a way that kept the relative spreads of each category. I did this because standardizing each variable on its own would ignore the fact the the share of shots from Corner 3's is smaller than the share of shots from Midrange. I used a similar technique when standardizing scoring type variables. 
+
+```{r}
+
+# Keep only years 2018 and later
+after18 <- subset %>%
+  filter(SEASON > 2018)
+
+# Get the sd for all the scoring type variables
+# This was done by taking the mean variance of each category then square rooting
+# to convert back to a standard deviation
+sd_share_of_pts2 <- after18 %>%
+  select(pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  summarize(sd = sd(val)) %>%
+  ungroup() %>%
+  mutate(var = sd * sd) %>%
+  pull(var) %>%
+  mean() %>%
+  sqrt()
+
+# Get the sd for all the shot selection variables
+sd_share_of_fga2 <- after18 %>%
+  select(PCT_RA : PCT_CN) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  summarize(sd = sd(val)) %>%
+  ungroup() %>%
+  mutate(var = sd * sd) %>%
+  pull(var) %>%
+  mean() %>%
+  sqrt()
+
+# Function to standardize each variable based on which category they fall in
+standardize <- function(x, type = 1) {
+  # type 1: Normal Statistic (not a share of pts or fga)
+  # type 2: stat is represented as a share of points
+  # type 3: stat is represented as a share of field goal attempts
+  
+  if (type == 1) {
+    return ((x - mean(x)) / sd(x))
+  }
+  if (type == 2) {
+    return ((x - mean(x)) / sd_share_of_pts2)
+  }
+  if (type == 3) {
+    return ((x - mean(x)) / sd_share_of_fga2)
+  }
+  
+}
+
+# Scale variables
+after_scaled <- after18 %>%
+  mutate(across(c(PACE : FD_RATE, PASS_PER_POSS, AVG_DRIB_PER_TOUCH), standardize),
+         across(c(pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST), ~ standardize(.x, type = 2)),
+         across(c(PCT_RA : PCT_CN), ~ standardize(.x, type = 3))) %>%
+  select(PACE : pct_PTS_POST)
+
+# Get the spread of every shot selection category
+ss_spreads <- after18 %>%
+  select(PCT_RA : PCT_CN) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  summarize(sd = sd(val)) %>%
+  ungroup() 
+
+# Shows the spreads of each shot selection category
+# Note that the spread of midrange is the greatest and the spread of Corner 3's is the smallest
+ss_spread_plot <- after18 %>%
+  select(PCT_RA : PCT_CN) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  mutate(above_avg = val - mean(val)) %>%
+  ungroup() %>%
+  left_join(ss_spreads, by = c("stat")) %>%
+  ggplot(aes(x = reorder(stat, -sd), y = above_avg)) +
+  geom_hline(yintercept = 0) +
+  geom_jitter(width = 0.3, shape = 21, fill = '#41c8e9',
+              size = 3) +
+  labs(x = "Shot Selection Category",
+       y = "% FGA above Category Sample Mean",
+       title = "Corner 3's have a Lower Spread than Other Shots",
+       subtitle = "Sample = Teams from 2018-19 to 2022-23 Seasons",
+       caption = "Data via NBA.com | Graph by Ayush Batra") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(labels = c("Midrange", "Above Break 3", "Restricted Area", "Paint (Non-RA)",
+                              "Corner 3")) 
+ss_spread_plot
+
+
+# Get the spread of every scoring type category
+pts_spreads <- after18 %>%
+  select(pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  summarize(sd = sd(val)) %>%
+  ungroup() %>%
+  arrange(-sd)
+
+# Shows the spreads of each scoring type category
+pts_type_spread_plot <- after18 %>%
+  select(pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST) %>%
+  pivot_longer(cols = everything(),
+               names_to = 'stat',
+               values_to = 'val') %>%
+  group_by(stat) %>%
+  mutate(above_avg = val - mean(val)) %>%
+  ungroup() %>%
+  left_join(pts_spreads, by = "stat") %>%
+  ggplot(aes(x = reorder(stat, -sd), y = above_avg)) +
+  geom_hline(yintercept = 0) +
+  geom_jitter(width = 0.3, shape = 21, fill = '#41c8e9',
+              size = 3) +
+  labs(x = "Scoring Type Category",
+       y = "% PTS above Category Sample Mean",
+       title = "Drives & Pull-Ups have a Greater Spread than Other Scoring Types",
+       subtitle = "Sample = Teams from 2018-19 to 2022-23 Seasons",
+       caption = "Data via NBA.com | Graph by Ayush Batra") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(labels = c("Drive", "Pull-Up", "Catch & Shoot",
+                              "Fastbreak", "Post", "2nd Chance")) 
+pts_type_spread_plot
+
+
+```
+
+## Running K-Means
+
+Now that the variables are scaled, it is possible to run the K-means clustering algorithm. First, to determine the optimal number of clusters, we can analyze a graph showing the total within sum of squares against the number of clusters. The idea is to find the "elbow", or where there is a sharp change of direction. After looking at the elbow plot, I thought that 3 clusters was the best number to use. Of course, one could choose a different number of clusters as there are different ways to interpret where the "elbow" is on the graph. 
+
+```{r}
+
+# Set seed for reproducible results
+set.seed(123)
+
+MAX_K <- 10
+sse <- c() 
+
+# Loop to get within sum of squares for each number of clusters
+for (k in 1:MAX_K) {
+  algo_k <- kmeans(after_scaled, centers=k, nstart=25, iter.max=20) # k-means algorithm
+  sse <- c(sse, algo_k$tot.withinss) # get SSE
+} 
+
+# Create graph using factoextra package
+elbow_plot <- fviz_nbclust(after_scaled, kmeans, method = 'wss') +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(size = 1, color = "#A0A0A0"))
+elbow_plot
+
+# Create graph manually
+tibble(
+  k = c(1:MAX_K),
+  sse = sse
+) %>%
+  ggplot(aes(x = k, y = sse)) +
+  geom_point(color = 'steelblue') +
+  geom_line(color = 'steelblue') +
+  labs(x = "Number of Clusters (k)",
+       y = "Total Within Sum of Squares",
+       title = "Optimal Number of Clusters") +
+  scale_x_continuous(breaks = seq(0, MAX_K, 1)) +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(size = 1, color = "#A0A0A0"))
+
+fviz_nbclust(after_scaled, kmeans, method = 'silhouette') +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(size = 1, color = "#A0A0A0"))
+
+# Choose number of clusters
+num_clusters = 3
+```
+
+The code below actually runs the K-means algorithm and assigns the calculated cluster to each observation. 
+
+```{r}
+# Calculate clusters
+km <- kmeans(after_scaled, centers = num_clusters)
+
+# Assign cluster to observation
+after18 <- after18 %>%
+  add_column(cluster = km$cluster)
+```
+
+Next, we can look at how cluster sizes varied by season. 
+
+```{r}
+
+after18 %>%
+  ggplot(aes(x = SEASON, fill = factor(cluster))) +
+  geom_bar(position = 'fill')
+
+# Attach Cluster Names to Data
+c_names <- c("Drive-Based",
+             "Ball Movement",
+             "Self Creation")
+
+cluster_key <- tibble(
+  cluster = c(1:num_clusters),
+  cluster_name = c_names
+)
+
+after18 <- after18 %>%
+  left_join(cluster_key, by = "cluster") 
+
+# Visualize a stacked bar graph
+year_plot <- after18 %>%
+  mutate(cluster_name = factor(cluster_name,
+                               levels = c_names)) %>%
+  ggplot(aes(x = SEASON, fill = cluster_name)) +
+  geom_bar(position = 'fill', color = 'black') +
+  labs(x = "Season",
+       y = "% of Teams",
+       fill = "Cluster",
+       title = "Offensive Clusters by Year",
+       caption = "Graph by Ayush Batra") +
+  scale_y_continuous(labels = scales::percent) 
+year_plot
+
+# Visualize a line graph
+after18 %>%
+  count(SEASON, cluster_name) %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = SEASON, y = n, color = cluster_name)) +
+  geom_point() +
+  geom_line()
+```
+
+It is interesting to see that the Ball Movement cluster is decreasing significantly. We will examine this later. To get a better idea of what qualities each cluster represents, we should examine the cluster centers for each of the variables used to create the clustering algorithm. 
+
+```{r}
+centers <- km$centers
+
+centers <- as.tibble(centers) %>%
+  mutate(cluster = c(1:num_clusters)) %>%
+  relocate(cluster, .before = PACE)
+
+byCluster <- centers %>%
+  pivot_longer(!cluster,
+               names_to = "Stat",
+               values_to = "avg_Z")
+
+# Get the standard deviation of cluster means for each stat
+# Higher value = cluster centers more spread apart = variable differentiates teams a lot
+# Lower value = cluster centers less spread apart = variable has low impact
+sd_by_stat <- byCluster %>%
+  group_by(Stat) %>%
+  summarize(sd = sd(avg_Z)) %>%
+  arrange(-sd)
+
+# See the cluster centers (in standardized units) for the non-scoring and non-shot selection statistic
+cluster_z_plot <- after18 %>%
+  select(cluster_name, PACE : FD_RATE, PASS_PER_POSS, AVG_DRIB_PER_TOUCH) %>%
+  mutate(across(c(PACE : FD_RATE, PASS_PER_POSS, AVG_DRIB_PER_TOUCH), ~ standardize(.x))) %>%
+  group_by(cluster_name) %>%
+  summarize(across(c(PACE : AVG_DRIB_PER_TOUCH), mean, .names = "mean_{.col}")) %>%
+  pivot_longer(!cluster_name,
+               names_prefix = "mean_",
+               names_to = 'stat',
+               values_to = 'avg_z') %>%
+  left_join(sd_by_stat, by = c("stat" = "Stat")) %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = avg_z, y = reorder(stat, sd))) +
+  geom_vline(xintercept = 0) +
+  geom_point(aes(fill = cluster_name), size = 3, shape = 21, color = 'black') +
+  scale_y_discrete(labels = c("Foul Drawn Rate","Pace","Turnover %",
+                              "Pass/Possession","Assist %","Dribbles/Touch")) +
+  labs(x = "Average Z-Score",
+       y = "Stat",
+       fill = "Cluster",
+       title = "Cluster Characteristics: Non-Scoring Stats",
+       caption = "Graph by Ayush Batra") 
+cluster_z_plot
+
+# See cluster centers for scoring type stats
+cluster_pts_plot <- after18 %>%
+  select(cluster_name, pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST) %>%
+  mutate(across(c(pct_2ND_CHANCE : pct_PTS_POST), ~.x - mean(.x))) %>%
+  group_by(cluster_name) %>%
+  summarize(across(c(pct_2ND_CHANCE : pct_PTS_POST), mean, .names = "mean_{.col}")) %>%
+  pivot_longer(!cluster_name,
+               names_prefix = "mean_",
+               names_to = 'split',
+               values_to = 'pct_PTS') %>%
+  left_join(sd_by_stat, by = c("split" = "Stat")) %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = pct_PTS, y = reorder(split, sd))) +
+  geom_vline(xintercept = 0) +
+  geom_point(aes(fill = cluster_name), size = 3, shape = 21, color = 'black') +
+  scale_x_continuous(labels = scales::percent,
+                     breaks = c(-0.02, 0, 0.02)) +
+  scale_y_discrete(labels = c("2nd Chance","Catch & Shoot","Fastbreak",
+                              "Post","Pull-Up","Drive")) +
+  labs(x = "% of Points Scored above Mean",
+       y = "Stat",
+       fill = "Cluster",
+       title = "Cluster Characteristics: Scoring Splits",
+       caption = "Graph by Ayush Batra") +
+  theme(panel.grid.minor.x = element_line(color = "#BEBEBE"))
+cluster_pts_plot
+
+
+# See cluster centers for shot selection stats
+cluster_fga_plot <- after18 %>%
+  select(cluster_name, PCT_RA : PCT_CN) %>%
+  mutate(across(c(PCT_RA : PCT_CN), ~.x - mean(.x))) %>%
+  group_by(cluster_name) %>%
+  summarize(across(c(PCT_RA : PCT_CN), mean, .names = "mean_{.col}")) %>%
+  pivot_longer(!cluster_name,
+               names_prefix = "mean_",
+               names_to = 'split',
+               values_to = 'pct_FGA') %>%
+  left_join(sd_by_stat, by = c("split" = "Stat")) %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = pct_FGA, y = reorder(split, sd))) +
+  geom_vline(xintercept = 0) +
+  geom_point(aes(fill = cluster_name), size = 3, shape = 21, color = 'black') +
+  scale_x_continuous(labels = scales::percent,
+                     breaks = c(-0.02, 0, 0.02)) +
+  scale_y_discrete(labels = c("Corner 3","Above Break 3","Paint (Non-RA)",
+                              "Restricted Area","Midrange")) +
+  labs(x = "% of Field Goal Attempts above Mean",
+       y = "Stat",
+       fill = "Cluster",
+       title = "Cluster Characteristics: Shot Selection",
+       caption = "Graph by Ayush Batra") +
+  theme(panel.grid.minor.x = element_line(color = "#BEBEBE"))
+cluster_fga_plot
+```
+
+Next, we can see how just a few variables can get uss really close to the clusters we already got. After taking a look at the spread of the cluster centers, it was evident that the % of poitns scored from drives and the % of points from pull-ups were the most impactful variables as they had the highest standard deviations in cluster centers. 
+
+By plotting the share of points from drives and the share of points from midrange together, we can already see the clusters form. If you look at the `drive_pu_plot`, it is easy to see that most Drived-Based teams score a lot of points from drives with less from pull-ups, Self Creation teams score lots of points from pull-ups, and Ball Movement teams don't score as much from either category (suggesting they have more off-ball action and cuts post-ups and stuff). We can go more in-depth and look at just one season to see where each team lies in that given season (2023 is shown in the `drive_pu_23_plot`)
+
+Lastly, another way to visualize how the clusters relate to each is by using the PCA plot. This graph plots the first principal component on the x-axis and the second principal component on the y-axis. The process of generating these principal components is a complex mathematical process that uses a lot of linear algebra, but the important thing is looking at the overlap of the clusters. Notice that the Ball Movement cluster and the Self Creation cluster have no overlap, suggesting they are very different from each other. Meanwhile, the Drived-Based cluster is not as different since there is some overlap for this cluster with the other two. 
+
+```{r}
+
+# This looks at which variables were the most impactful (high sd) and least impactful (low sd) in the clustering analysis
+byCluster %>%
+  group_by(Stat) %>%
+  summarize(sd = sd(avg_Z)) %>%
+  arrange(-sd)
+
+byCluster %>%
+  group_by(Stat) %>%
+  summarize(sd = sd(avg_Z)) %>%
+  arrange(-sd) %>%
+  ggplot(aes(y = reorder(Stat, sd), x = sd)) +
+  geom_col(fill = "#41c8e9", color = 'black') 
+
+
+# See how just drives and pull-ups already gives a good idea about cluster
+drive_pu_plot <- after18 %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = pct_PTS_DRIVE, y = pct_PTS_PU)) +
+  geom_point(aes(fill = cluster_name), size = 3, shape = 21, color = 'black') +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "% of Points from Drives",
+       y = "% of Points from Pull-Ups",
+       fill = "Cluster",
+       title = "Stylistic Differences: Drives & Pull-Ups",
+       caption = "Graph by Ayush Batra")
+drive_pu_plot
+
+# Get team logos
+logos <- espn_nba_teams() %>%
+  select(display_name, logo)
+
+# See the stats for just one season (red points incidcate season of interest)
+SZN = 2023
+
+after18 %>%
+  mutate(thisSeason = (SEASON == SZN)) %>%
+  ggplot(aes(x = pct_PTS_DRIVE, y = pct_PTS_PU)) +
+  geom_point(aes(color = thisSeason)) +
+  scale_color_manual(values = c('gray', 'red'))
+
+# See the stats by each team in the season of interest
+drive_pu_23_plot <- after18 %>%
+  left_join(logos, by = c("TEAM_NAME" = "display_name")) %>%
+  ggplot(aes(x = pct_PTS_DRIVE, y = pct_PTS_PU)) +
+  geom_point(data = after18 %>% filter(SEASON != SZN),
+             shape = 21,
+             fill = 'gray') +
+  geom_image(data = after18 %>% filter(SEASON == SZN) %>% left_join(logos, by = c("TEAM_NAME" = "display_name")),
+             aes(image = logo), size = 0.12) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "% of Points from Drives",
+       y = "% of Points from Pull-Ups",
+       title = "The Warriors and Nuggets are Unique",
+       subtitle = paste("Logos for", SZN, "stats | grayed out points = other season's stats"),
+       caption = "Graph by Ayush Batra") 
+drive_pu_23_plot
+
+# Use PCA to see cluster distances from each other
+pca_plot <- fviz_cluster(km, data = after_scaled, geom = "point") +
+  scale_fill_discrete(labels = c_names) +
+  scale_color_discrete(labels = c_names) +
+  scale_shape_discrete(labels = c_names) 
+pca_plot
+```
+
+# Cluster Similarity Scores
+
+Another way to see exactly how a team's play style fits into these clusters is to look at the distance from the team to each cluster center. The clustering algorithm works so that each team will be grouped into the cluster with the closest distance, but seeing if a team is equally far from all three clusters as opposed to very cluster to one particular cluster can tell us more about how much they conform to the cluster's characteristics. 
+
+```{r}
+
+# Get the distance for each team and each stat from the 3 cluster centers
+sim_scores <- after18 %>%
+  mutate(across(c(PACE : FD_RATE, PASS_PER_POSS, AVG_DRIB_PER_TOUCH), standardize),
+         across(c(pct_2ND_CHANCE : pct_FB, pct_PTS_DRIVE : pct_PTS_POST), ~ standardize(.x, type = 2)),
+         across(c(PCT_RA : PCT_CN), ~ standardize(.x, type = 3))) %>%
+  select(TEAM_NAME, SEASON, PACE : pct_PTS_POST) %>%
+  pivot_longer(cols = c(PACE : pct_PTS_POST),
+               names_to = 'stat',
+               values_to = 'tm_z') 
+
+c_stats <- centers %>%
+  pivot_longer(cols = c(PACE : pct_PTS_POST),
+               names_to = 'stat',
+               values_to = 'cluster_z')
+
+sim_scores <- sim_scores %>%
+  inner_join(c_stats, by = "stat", relationship = "many-to-many") %>%
+  mutate(dist = (tm_z - cluster_z)^2)
+
+# Calculate the overall (squared) distance to each cluster center for each team
+sim_summary <- sim_scores %>%
+  group_by(TEAM_NAME, SEASON, cluster) %>%
+  summarize(dist = sum(dist)) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = c(TEAM_NAME, SEASON),
+              names_from = cluster,
+              values_from = dist,
+              names_prefix = "cluster")
+
+# Find the closeness to the cluster they were grouped in
+sim_summary <- sim_summary %>%
+  rowwise() %>%
+  mutate(unique = min(cluster1, cluster2, cluster3)) %>%
+  ungroup() %>%
+  mutate(closeness = 1 - unique / (cluster1 + cluster2 + cluster3))
+```
+
+The `sim_summary` data shows the closeness of each team to their respective cluster. The closeness will have values ranging from 66.7% to 100%. Using 2023 as an example, the Clippers had the greatest closeness to their cluster (93%) while the Bucks had the lowest closeness (68%). This means that the Clippers were very close to their cluster center. Their cluster was Self Creation, so the Clippers have very similar traits to the typical Self Creation offense, which includes lots of midrange shots, lots of pull-up points, and lots of dribbles, among others. Meanwhile, the Bucks having a low closeness means they were difficult to categorize. They are a mix of each cluster and do not conform to the typical team in either of the 3 clusters. Ultimately, they were categorized as a Self Creation offense, but this doesn't really tell us much since they had a similar distance to the two other cluster centers. Further analysis using distances to cluster centers can be found below:
+
+```{r}
+
+after18 <- after18 %>%
+  inner_join(sim_summary, by = c("TEAM_NAME", "SEASON"))
+
+# See how mean (squared) distance to each cluster has changed over time
+after18 %>%
+  group_by(SEASON) %>%
+  summarize(across(c(cluster1 : cluster3), mean, .names = "mean_{.col}")) %>%
+  ungroup() %>%
+  pivot_longer(!SEASON,
+               names_to = "cluster",
+               values_to = "mean_dist",
+               names_prefix = "mean_cluster") %>%
+  ggplot(aes(x = SEASON, y = mean_dist, color = cluster)) +
+  geom_point() +
+  geom_line() 
+
+
+# See which variables are leading to mean distance increases/decreases
+# Edge diff represents the difference in average distance to the cluster's center between the last year (2023) and the first year (2019) in the sample
+# When setting MY_CLUSTER = 2, we can see that the share of points from drives has been the biggest factor driving increases in average distance to the Ball Movement cluster center
+MY_CLUSTER = 2
+
+sim_scores %>%
+  group_by(SEASON, cluster, stat) %>%
+  summarize(avg_dist = mean(dist)) %>%
+  ungroup() %>%
+  filter(cluster == MY_CLUSTER) %>%
+  pivot_wider(id_cols = stat,
+              names_from = SEASON,
+              values_from = avg_dist,
+              names_prefix = "season") %>%
+  mutate(edge_diff = season2023 - season2019) %>%
+  ggplot(aes(y = reorder(stat, -edge_diff), x = edge_diff)) +
+  geom_col()
+
+
+```
+
+# Why the Ball Movement Cluster Size has Decreased
+
+To end the analysis, I wanted to investigate why the Ball Movement cluster size has decreased recently. As seen in the previous plot (using `sim_scores`), drives are the bigest factor in further distances to the Ball Movement cluster center. To get a better idea of how drives are influencing the clusters, I made the plots below. 
+
+These plots have a lot going on, so I will explain. The first one (`drive_time_plot`), shows points representing the % of points from drives for each team in the given season. The color represents the cluster, as seen in the legend. The green dotted line represents the Ball Movement cluster average, and the thick black line represents the NBA average. From the graph, you can see that more and more teams are moving away from the Ball Movement cluster average for the share of points from drives, which is causing fewer teams to be put into this cluster. The other plots, made using the `zoneTimePlot` function I programmed, show the same elements but for shot selection categories instead of the share of points from drives. 
+
+```{r}
+
+
+drive_time_plot <- after18 %>%
+  mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+  ggplot(aes(x = SEASON, y = pct_PTS_DRIVE,
+             color = cluster_name)) +
+  geom_hline(yintercept = after18 %>% filter(cluster == 2) %>% summarize(m = mean(pct_PTS_DRIVE)) %>% pull(m),
+             linetype = 'dashed',
+             color = hue_pal()(3)[2], linewidth = 1) +
+  geom_line(data = after18 %>% group_by(SEASON) %>% summarize(y = mean(pct_PTS_DRIVE)),
+            aes(x = SEASON, y = y),
+            linewidth = 2,
+            color = 'black') +
+  geom_jitter(width = 0.3, shape = 21, size = 3,
+              aes(fill = cluster_name), color = 'black') +
+  annotate("text", x = 2022.8, y = 0.187, label = "Ball Movement\nCluster Average",
+           color = scales::hue_pal()(3)[2]) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Season",
+       y = "% of Points from Drives",
+       fill = "Cluster",
+       title = "Drives have Increased",
+       subtitle = "And the Ball Movement Style has Decreased",
+       caption = "Graph by Ayush Batra") 
+drive_time_plot
+
+
+zoneTimePlot <- function(col, zone_name) {
+  zone_time_plot <- after18 %>%
+    mutate(cluster_name = factor(cluster_name, levels = c_names)) %>%
+    ggplot(aes(x = SEASON, y = .data[[col]])) +
+    geom_hline(yintercept = after18 %>% filter(cluster == 2) %>% summarize(m = mean(.data[[col]])) %>% pull(m),
+               linetype = 'dashed',
+               color = hue_pal()(3)[2], size = 1) +
+    geom_hline(yintercept = after18 %>% filter(cluster == 1) %>% summarize(m = mean(.data[[col]])) %>% pull(m),
+               linetype = 'dashed',
+               color = hue_pal()(3)[1], size = 1) +
+    geom_hline(yintercept = after18 %>% filter(cluster == 3) %>% summarize(m = mean(.data[[col]])) %>% pull(m),
+               linetype = 'dashed',
+               color = hue_pal()(3)[3], size = 1) +
+    geom_line(data = after18 %>% group_by(SEASON) %>% summarize(y = mean(.data[[col]])),
+              aes(x = SEASON, y = y),
+              linewidth = 2,
+              color = 'black') +
+    geom_jitter(width = 0.3, shape = 21, size = 3,
+                aes(fill = cluster_name), color = 'black') +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = "Season",
+         y = paste("% of Shots", zone_name),
+         fill = "Cluster",
+         title = "How Shot Selection Changes have Affected Clusters",
+         subtitle = "Dotted Lines show cluster averages",
+         caption = "Graph by Ayush Batra")
+  
+  return(zone_time_plot)
+}
+
+paint_time_plot <- zoneTimePlot(col = "PCT_PT", zone_name = "in the Paint (Non-RA)")
+paint_time_plot
+
+ra_time_plot <- zoneTimePlot(col = "PCT_RA", zone_name = "from the Restricted Area")
+ra_time_plot
+
+mid_time_plot <- zoneTimePlot(col = "PCT_MR", zone_name = "from Midrange")
+mid_time_plot <- mid_time_plot +
+  scale_y_continuous(labels = scales::percent,
+                     breaks = seq(0.05, 0.25, 0.05))
+mid_time_plot
+  
+```
+
+That is all for this analysis. Thanks for reading if you made it this far!
+
